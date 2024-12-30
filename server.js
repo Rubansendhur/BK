@@ -514,29 +514,22 @@ app.get('/images', async (req, res) => {
 app.use(express.json());
 
 // Function to generate OTP
-function generateOtp() {
-  return Math.floor(100000 + Math.random() * 900000).toString(); // Generates a 6-digit OTP
-}
+const otpStore = {};
 
-app.post('/api/sendOtp', (req, res) => {
-  const { email } = req.body;
+// Utility function to generate OTP
+const generateOtp = () => Math.floor(100000 + Math.random() * 900000).toString();
 
-  if (!email) {
-    return res.status(400).json({ message: 'Email is required' });
-  }
-
-  const otp = Math.floor(100000 + Math.random() * 900000).toString(); // Generate a 6-digit OTP
-  const normalizedEmail = email.trim().toLowerCase();
-
-  otpStore[normalizedEmail] = { otp, timestamp: Date.now() };
-  console.log('OTP generated and stored:', otpStore[normalizedEmail]);
-
-  // Simulate sending OTP (in real case, integrate an email/SMS service)
-  res.status(200).json({ message: 'OTP sent successfully', otp }); // Remove OTP from response in production
+// Nodemailer transporter setup
+const transporter1 = nodemailer.createTransport({
+  service: 'gmail',
+  auth: {
+    user: process.env.EMAIL_USER,
+    pass: process.env.EMAIL_PASS,
+  },
 });
 
-otpStore={}
-// API to send OTP to the user's email
+// API to send OTP
+
 app.post('/api/signup1', (req, res) => {
   const { email } = req.body;
 
@@ -545,18 +538,18 @@ app.post('/api/signup1', (req, res) => {
   }
 
   const otp = generateOtp();
-  otpStore[email] = otp; // Store OTP temporarily in memory
-
-  // Setup Nodemailer transporter
+  otpStore[email] = { otp, timestamp: Date.now() }; // Store OTP with timestamp
+  const hashedOtp =  bcrypt.hash(otp, 10);  // Hash the OTP
+  console.log('Generated OTP:', otp); // Debug: Log the generated OTP
+  
   const transporter = nodemailer.createTransport({
-    service: 'gmail', // You can use other services (e.g., SendGrid, Mailgun)
+    service: 'gmail',
     auth: {
-      user: process.env.EMAIL_USER, // Use your email
-      pass:process.env.EMAIL_PASS ,  // Use your email password or app password
+      user: process.env.EMAIL_USER,
+      pass: process.env.EMAIL_PASS,
     },
   });
 
-  // Send OTP email
   const mailOptions = {
     from: process.env.EMAIL_USER,
     to: email,
@@ -568,65 +561,69 @@ app.post('/api/signup1', (req, res) => {
     if (err) {
       return res.status(500).json({ message: 'Error sending OTP', error: err });
     }
+
     console.log(`OTP sent to ${email}: ${otp}`);
     res.status(200).json({ message: 'OTP sent successfully' });
-    console.log('OTP sent successfully');
   });
 });
 
-// API to verify the OTP
-// Replace with a proper store like Redis in production
 
+// API to verify OTP
+// API to verify OTP and complete signup
 app.post('/api/verifyOtp', async (req, res) => {
-  const { email, username, password, otp } = req.body;
+  const { email, otp } = req.body;
 
-  // Validate request fields
-  if (!email || !otp || !username || !password) {
-    return res.status(400).json({ message: 'Email, OTP, username, and password are required' });
+  // Validate input
+  if (!email || !otp) {
+    return res.status(400).json({ message: 'Email and OTP are required' });
   }
 
   const normalizedEmail = email.trim().toLowerCase();
-  console.log('Normalized email:', normalizedEmail);
-
-  // Retrieve OTP data from otpStore
-  const otpData = otpStore[normalizedEmail];
-  console.log('Retrieved OTP data:', otpData);
-
-  // Verify OTP
-  if (!otpData || String(otpData) !== String(otp)) {
-    return res.status(400).json({ message: 'Invalid OTP. Please try again.' });
-  }
-
-  // Delete OTP after successful verification
-  delete otpStore[normalizedEmail];
+  console.log(`Received OTP verification for email: ${normalizedEmail}`);
 
   try {
-    // Hash the password
-    const hashedPassword = await bcrypt.hash(password, 10);
-
-    // Create a new user instance
-    const user = new User({ username: username.trim(), email: normalizedEmail, password: hashedPassword });
-
-    // Save the user
-    await user.save();
-
-    console.log('User created:', user);
-    return res.status(201).json({ message: 'User created successfully' });
-  } catch (error) {
-    console.error('Error creating user:', error.message);
-
-    // Handle duplicate key error
-    if (error.code === 11000) {
-      if (error.keyValue && error.keyValue.email) {
-        return res.status(400).json({ message: 'Email already exists' });
-      }
-      if (error.keyValue && error.keyValue.username) {
-        return res.status(400).json({ message: 'Username already exists' });
-      }
+    // Find the user by email
+    const user = await User.findOne({ email: normalizedEmail });
+    if (!user) {
+      console.log(`User not found for email: ${normalizedEmail}`);
+      return res.status(404).json({ message: 'User not found' });
     }
 
-    // Generic error response
-    return res.status(500).json({ message: 'Error creating user', error: error.message });
+    // Log the stored OTP and expiration for debugging
+    console.log('Stored OTP hash:', user.otp); // Debug: Log the stored hashed OTP
+    console.log('OTP expires at:', user.otpExpires);
+
+    // Check if OTP is expired
+    if (Date.now() > user.otpExpires) {
+      console.log('OTP has expired');
+      return res.status(400).json({ message: 'OTP has expired' });
+    }
+
+    // Compare the OTP with the hashed OTP
+    const isOtpValid = await bcrypt.compare(otp, user.otp);
+    console.log('OTP comparison result:', isOtpValid); // Debug: Log the result of OTP comparison
+
+    if (!isOtpValid) {
+      console.log('Invalid OTP entered');
+      return res.status(400).json({ message: 'Invalid OTP. Please try again.' });
+    }
+
+    // Clear OTP data after successful verification
+    user.otp = null;
+    user.otpExpires = null;
+    await user.save();
+
+    console.log('OTP verified successfully for:', user.email);
+    res.status(200).json({
+      message: 'OTP verified successfully, user created',
+      user: {
+        username: user.username,
+        email: user.email,
+      },
+    });
+  } catch (error) {
+    console.error('Error verifying OTP:', error);
+    res.status(500).json({ message: 'Internal server error' });
   }
 });
 
